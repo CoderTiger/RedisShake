@@ -40,6 +40,7 @@ type SyncReaderOptions struct {
 	PreferReplica bool                   `mapstructure:"prefer_replica" default:"false"`
 	TryDiskless   bool                   `mapstructure:"try_diskless" default:"false"`
 	Sentinel      client.SentinelOptions `mapstructure:"sentinel"`
+	KvstoreIndex  string                 `mapstructure:"kvstore_index" default:"-1"`
 }
 
 const RDB_EOF_MARKER_LEN = 40
@@ -241,6 +242,9 @@ func (r *syncStandaloneReader) sendPSync() {
 	r.checkBgsaveInProgress()
 	// send PSync
 	argv := []interface{}{"PSYNC", "?", "-1"}
+	if r.opts.KvstoreIndex != "-1" {
+		argv = append(argv, r.opts.KvstoreIndex)
+	}
 	if config.Opt.Advanced.AwsPSync != "" {
 		argv = []interface{}{config.Opt.Advanced.GetPSyncCommand(r.stat.Address), "?", "-1"}
 	}
