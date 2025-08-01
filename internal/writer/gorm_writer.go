@@ -1,0 +1,214 @@
+package writer
+
+import (
+	"RedisShake/common"
+	"RedisShake/internal/entry"
+	"RedisShake/internal/log"
+	"context"
+	"fmt"
+	"plugin"
+	"sync"
+	"time"
+
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+
+	// "gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
+
+	_ "github.com/joho/godotenv/autoload"
+)
+
+type GormWriterOptions struct {
+	Host   string `mapstructure:"host" default:"localhost"`
+	Port   int    `mapstructure:"port" default:"4000"`
+	User   string `mapstructure:"user" default:"root"`
+	Pass   string `mapstructure:"pass" default:""`
+	Db     string `mapstructure:"db" default:"redis_shake"`
+	UseSSL bool   `mapstructure:"use_ssl" default:"false"`
+	// Connection pool settings
+	MaxIdleConns    int `mapstructure:"max_idle_conns" default:"10"`
+	MaxOpenConns    int `mapstructure:"max_open_conns" default:"100"`
+	ConnMaxLifetime int `mapstructure:"conn_max_lifetime" default:"-1"` // no limit
+	// Entry writer plugins
+	Plugins []string `mapstructure:"plugins" default:"[]"`
+}
+
+// implements Writer interface
+type gormWriter struct {
+	db   *gorm.DB
+	DbId int
+	ch   chan *entry.Entry
+	chWg sync.WaitGroup
+	stat struct {
+		EntryCount int `json:"entry_count"`
+	}
+
+	plugins []*common.GormEntryWriter
+}
+
+func getDSN(opts *GormWriterOptions) string {
+	var tlsValue string
+	if opts.UseSSL {
+		tlsValue = "true"
+	} else {
+		tlsValue = "false"
+	}
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&tls=%s",
+		opts.User, opts.Pass, opts.Host, opts.Port, opts.Db, tlsValue)
+	return dsn
+}
+
+func createDB(opts *GormWriterOptions) *gorm.DB {
+	// Create GORM DB instance
+	db, err := gorm.Open(mysql.Open(getDSN(opts)), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
+	if err != nil {
+		panic(err)
+	}
+	// Set connection pool options
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Panicf("failed to get sql.DB: %v", err)
+	}
+	sqlDB.SetMaxIdleConns(opts.MaxIdleConns)
+	sqlDB.SetMaxOpenConns(opts.MaxOpenConns)
+	sqlDB.SetConnMaxLifetime(time.Duration(opts.ConnMaxLifetime) * time.Second)
+
+	return db
+}
+
+func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
+	var plugins []*common.GormEntryWriter
+	for _, pluginPath := range opts.Plugins {
+		pluginObj, err := plugin.Open(pluginPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open plugin %s: %w", pluginPath, err)
+		}
+
+		newWriterFuncSym, err := pluginObj.Lookup("NewGormEntryWriter")
+		if err != nil {
+			return nil, fmt.Errorf("plugin %s does not export 'Plugin' symbol: %w", pluginPath, err)
+		}
+
+		newWriterFunc, ok := newWriterFuncSym.(func() common.GormEntryWriter)
+		if !ok {
+			return nil, fmt.Errorf("plugin %s does not export 'NewGormEntryWriter' function with correct signature", pluginPath)
+		}
+
+		p := newWriterFunc()
+
+		if err := p.Init(db); err != nil {
+			return nil, fmt.Errorf("failed to initialize plugin %s: %w", pluginPath, err)
+		}
+
+		log.Infof("Loaded plugin: %s", pluginPath)
+		plugins = append(plugins, &p)
+	}
+	return plugins, nil
+}
+
+func NewGormWriter(ctx context.Context, opts *GormWriterOptions) Writer {
+	// log.Infof("Creating GormWriter with options: %+v", opts)
+	if opts.Host == "" || opts.Port <= 0 || opts.User == "" || opts.Db == "" {
+		log.Panicf("Invalid GormWriter options: %+v", opts)
+	}
+	if opts.MaxIdleConns <= 0 || opts.MaxOpenConns <= 0 {
+		log.Panicf("Invalid connection pool settings: max_idle_conns=%d, max_open_conns=%d",
+			opts.MaxIdleConns, opts.MaxOpenConns)
+	}
+	w := &gormWriter{}
+	w.db = createDB(opts)
+	plugins, err := loadPlugins(opts, w.db)
+	if err != nil {
+		log.Panicf("%v", err)
+	}
+	w.plugins = plugins
+	w.DbId = 0
+	w.ch = make(chan *entry.Entry, 1000)
+	w.chWg.Add(1)
+	w.stat.EntryCount = 0
+	return w
+}
+
+func (w *gormWriter) Write(e *entry.Entry) {
+	w.ch <- e
+}
+
+func (w *gormWriter) StartWrite(ctx context.Context) (ch chan *entry.Entry) {
+	w.chWg = sync.WaitGroup{}
+	w.chWg.Add(1)
+	go w.processWrite(ctx)
+	return w.ch
+}
+
+func (w *gormWriter) Close() {
+	close(w.ch)
+	w.chWg.Wait()
+	log.Infof("GormWriter closed, total entries written: %d", w.stat.EntryCount)
+}
+
+func (w *gormWriter) Status() interface{} {
+	return w.stat
+}
+
+func (w *gormWriter) StatusString() string {
+	return "[gorm_writer] writing to database, entry count=" + string(w.stat.EntryCount)
+}
+
+func (w *gormWriter) StatusConsistent() bool {
+	return true
+}
+
+func (w *gormWriter) writeEntry(db *gorm.DB, e *entry.Entry) {
+	commonEntry := &common.Entry{
+		DbId:           e.DbId,
+		Argv:           e.Argv,
+		CmdName:        e.CmdName,
+		Group:          e.Group,
+		Keys:           e.Keys,
+		KeyIndexes:     e.KeyIndexes,
+		Slots:          e.Slots,
+		SerializedSize: e.SerializedSize,
+	}
+
+	for _, plugin := range w.plugins {
+		if err := (*plugin).Write(commonEntry); err != nil {
+			log.Warnf("failed to write entry using plugin: %v", err)
+			continue
+		}
+	}
+}
+
+func (w *gormWriter) Flush() error {
+	if err := w.db.Save(&w.stat).Error; err != nil {
+		log.Warnf("failed to flush GORM writer: %v", err)
+		return err
+	}
+	log.Infof("GORM writer flushed successfully")
+	return nil
+}
+
+func (w *gormWriter) processWrite(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// do nothing until w.ch is closed
+		case <-ticker.C:
+			w.Flush()
+		case e, ok := <-w.ch:
+			if !ok {
+				// clean up and exit
+				w.chWg.Done()
+				w.Flush()
+				return
+			}
+			w.stat.EntryCount++
+			w.writeEntry(w.db, e)
+		}
+	}
+}

@@ -5,7 +5,7 @@ set -e
 echo "[ BUILD RELEASE ]"
 BIN_DIR=$(pwd)/bin/
 rm -rf "$BIN_DIR"
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR/plugins"
 
 cp shake.toml "$BIN_DIR"
 
@@ -22,7 +22,15 @@ dist() {
     export GOOS=$1
     export GOARCH=$2
     export CGO_ENABLED=0
+    
     go build -v -trimpath -ldflags "${LDFLAGS}" -o "$BIN_DIR/redis-shake" "./cmd/redis-shake"
+
+    # Build plugin in its own directory
+    cd "./examples/gorm_entry_writer_demo"
+    mkdir -p "../../$BIN_DIR/plugins"
+    go build -buildmode=plugin -v -trimpath -ldflags "${LDFLAGS}" -o "$BIN_DIR/plugins/gorm_entry_writer_demo.so"
+    cd "../.."
+
     unset GOOS
     unset GOARCH
     echo "build success GOOS=$1 GOARCH=$2"
@@ -43,5 +51,12 @@ fi
 
 # build the current platform
 echo "try build for current platform"
+
 go build -v -trimpath -ldflags "${LDFLAGS}" -o "$BIN_DIR/redis-shake" "./cmd/redis-shake"
+
+# Build plugin in its own directory
+cd "./examples/gorm_entry_writer_demo"
+go build -buildmode=plugin -v -trimpath -ldflags "${LDFLAGS}" -o "$BIN_DIR/plugins/gorm_entry_writer_demo.so"
+cd "../.."
+
 echo "build success"
