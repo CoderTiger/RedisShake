@@ -182,6 +182,24 @@ func main() {
 			entry.Argv = []string{"FLUSHALL"}
 			theWriter.Write(entry)
 		}
+	case v.IsSet("gorm_writer"):
+		opts := new(writer.GormWriterOptions)
+		defaults.SetDefaults(opts)
+		err := v.UnmarshalKey("gorm_writer", opts)
+		if err != nil {
+			log.Panicf("failed to read the GormWriter config entry. err: %v", err)
+		}
+		log.Infof("create GormWriter")
+		log.Infof("* host: %s", opts.Host)
+		log.Infof("* port: %d", opts.Port)
+		log.Infof("* user: %s", opts.User)
+		log.Infof("* pass: %s", strings.Repeat("*", len(opts.Pass)))
+		log.Infof("* db: %s", opts.Db)
+		log.Infof("* use_ssl: %v", opts.UseSSL)
+		log.Infof("* max_idle_conns: %d", opts.MaxIdleConns)
+		log.Infof("* max_open_conns: %d", opts.MaxOpenConns)
+		log.Infof("* conn_max_lifetime: %d", opts.ConnMaxLifetime)
+		theWriter = writer.NewGormWriter(ctx, opts)
 	default:
 		log.Panicf("no writer config entry found")
 	}
