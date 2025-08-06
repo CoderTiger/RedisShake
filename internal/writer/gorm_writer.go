@@ -154,7 +154,7 @@ func (w *gormWriter) Status() interface{} {
 }
 
 func (w *gormWriter) StatusString() string {
-	return "[gorm_writer] writing to database, entry count=" + string(w.stat.EntryCount)
+	return "[gorm_writer] writing to database, entry count=" + fmt.Sprint(w.stat.EntryCount)
 }
 
 func (w *gormWriter) StatusConsistent() bool {
@@ -182,11 +182,7 @@ func (w *gormWriter) writeEntry(db *gorm.DB, e *entry.Entry) {
 }
 
 func (w *gormWriter) Flush() error {
-	if err := w.db.Save(&w.stat).Error; err != nil {
-		log.Warnf("failed to flush GORM writer: %v", err)
-		return err
-	}
-	log.Infof("GORM writer flushed successfully")
+	// do nothing for now, TODO: investigate how to flush with GORM
 	return nil
 }
 
