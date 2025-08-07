@@ -24,7 +24,8 @@ func NewGormEntryWriter() common.GormEntryWriter {
 //go:embed assets/sql/*.sql
 var sqlFS embed.FS
 
-var sqlFileNames = []string{"redis_string.sql",
+var sqlFileNames = []string{
+	"redis_string.sql",
 	"redis_hash.sql",
 	"redis_list.sql",
 	"redis_set.sql",
