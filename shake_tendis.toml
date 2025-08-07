@@ -42,10 +42,10 @@ kvstore_index = "[0-9]"    # ref: http://tendis.cn/#/Tendisplus/知识库/数据
 # type = "json" #cmd,aof,json (default cmd)
 
 [gorm_writer]
-host = "172.17.1.32"
+host = "redis-shake-database-example"
 port = 4000
 user = "root"
-pass = "6@ePVp^2*jRB9530J-"
+pass = ""
 db = "redis_to_rdb"
 use_ssl = false
 max_idle_conns = 10
