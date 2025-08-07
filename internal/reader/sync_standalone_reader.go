@@ -29,6 +29,7 @@ import (
 )
 
 type SyncReaderOptions struct {
+	IsTendis      bool                   `mapstructure:"is_tendis" default:"false"` // Set to true if the source is a Tendis database
 	Cluster       bool                   `mapstructure:"cluster" default:"false"`
 	Address       string                 `mapstructure:"address" default:""`
 	Username      string                 `mapstructure:"username" default:""`
@@ -144,7 +145,7 @@ func (r *syncStandaloneReader) supportPSync() bool {
 }
 
 func (r *syncStandaloneReader) StartRead(ctx context.Context) []chan *entry.Entry {
-	if r.supportPSync() { // Redis version >= 2.8
+	if r.supportPSync() || r.opts.IsTendis { // Redis version >= 2.8
 		return r.StartReadWithPSync(ctx)
 	} else { // Redis version < 2.8
 		return r.StartReadWithSync(ctx)
@@ -156,7 +157,9 @@ func (r *syncStandaloneReader) StartReadWithPSync(ctx context.Context) []chan *e
 	r.ctx = ctx
 	r.ch = make(chan *entry.Entry, 1024)
 	go func() {
-		r.sendReplconfListenPort()
+		if !r.opts.IsTendis {
+			r.sendReplconfListenPort()
+		}
 		r.sendPSync()
 		rdbFilePath := r.receiveRDB()
 		startOffset := r.stat.AofReceivedOffset
@@ -230,7 +233,7 @@ func (r *syncStandaloneReader) checkBgsaveInProgress() {
 }
 
 func (r *syncStandaloneReader) sendPSync() {
-	if r.opts.TryDiskless {
+	if r.opts.TryDiskless && !r.opts.IsTendis {
 		argv := []interface{}{"REPLCONF", "CAPA", "EOF"}
 		reply := r.client.DoWithStringReply(argv...)
 		if reply != "OK" {
