@@ -52,8 +52,9 @@ max_idle_conns = 10
 max_open_conns = 100
 conn_max_lifetime = -1 # seconds, <= 0 means no limit
 plugins = [
-    "/Users/yxd/studio/code/projects/RedisShake/bin/plugins/gorm_entry_writer_demo.so" # plugin name, must be in plugins directory
+    "/your_plugin_folder/plugin_file.so", # replace with your actual plugin path
 ]
+log_level = "info" # silent, error, warn, info
 
 [filter]
 # Allow keys with specific prefixes or suffixes

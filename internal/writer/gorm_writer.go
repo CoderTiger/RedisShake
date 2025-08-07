@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"plugin"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,7 +32,8 @@ type GormWriterOptions struct {
 	MaxOpenConns    int `mapstructure:"max_open_conns" default:"100"`
 	ConnMaxLifetime int `mapstructure:"conn_max_lifetime" default:"-1"` // no limit
 	// Entry writer plugins
-	Plugins []string `mapstructure:"plugins" default:"[]"`
+	Plugins  []string `mapstructure:"plugins" default:"[]"`
+	LogLevel string   `mapstructure:"log_level" default:"info"` // all options: silent, error, warn, info
 }
 
 // implements Writer interface
@@ -67,6 +69,21 @@ func createDB(opts *GormWriterOptions) *gorm.DB {
 	if err != nil {
 		panic(err)
 	}
+
+	logLevel := strings.ToLower(opts.LogLevel)
+	switch logLevel {
+	case "silent":
+		db.Logger = logger.Default.LogMode(logger.Silent)
+	case "error":
+		db.Logger = logger.Default.LogMode(logger.Error)
+	case "warn":
+		db.Logger = logger.Default.LogMode(logger.Warn)
+	case "info":
+		db.Logger = logger.Default.LogMode(logger.Info)
+	default:
+		log.Panicf("Invalid log level: %s. Supported values are: silent, error, warn, info", opts.LogLevel)
+	}
+
 	// Set connection pool options
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -79,7 +96,7 @@ func createDB(opts *GormWriterOptions) *gorm.DB {
 	return db
 }
 
-func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
+func loadPlugins(ctx context.Context, opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
 	var plugins []*common.GormEntryWriter
 	for _, pluginPath := range opts.Plugins {
 		pluginObj, err := plugin.Open(pluginPath)
@@ -99,7 +116,7 @@ func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWrite
 
 		p := newWriterFunc()
 
-		if err := p.Init(db); err != nil {
+		if err := p.Init(ctx, db); err != nil {
 			return nil, fmt.Errorf("failed to initialize plugin %s: %w", pluginPath, err)
 		}
 
@@ -110,7 +127,6 @@ func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWrite
 }
 
 func NewGormWriter(ctx context.Context, opts *GormWriterOptions) Writer {
-	// log.Infof("Creating GormWriter with options: %+v", opts)
 	if opts.Host == "" || opts.Port <= 0 || opts.User == "" || opts.Db == "" {
 		log.Panicf("Invalid GormWriter options: %+v", opts)
 	}
@@ -120,7 +136,7 @@ func NewGormWriter(ctx context.Context, opts *GormWriterOptions) Writer {
 	}
 	w := &gormWriter{}
 	w.db = createDB(opts)
-	plugins, err := loadPlugins(opts, w.db)
+	plugins, err := loadPlugins(ctx, opts, w.db)
 	if err != nil {
 		log.Panicf("%v", err)
 	}
@@ -161,7 +177,7 @@ func (w *gormWriter) StatusConsistent() bool {
 	return true
 }
 
-func (w *gormWriter) writeEntry(db *gorm.DB, e *entry.Entry) {
+func (w *gormWriter) writeEntry(_ *gorm.DB, e *entry.Entry) {
 	commonEntry := &common.Entry{
 		DbId:           e.DbId,
 		Argv:           e.Argv,

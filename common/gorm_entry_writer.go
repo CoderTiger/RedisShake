@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+
 	"gorm.io/gorm"
 )
 
@@ -17,7 +19,7 @@ type Entry struct {
 }
 
 type GormEntryWriter interface {
-	Init(db *gorm.DB) error
+	Init(ctx context.Context, db *gorm.DB) error
 	Write(e *Entry) error
 	Close() error
 }
