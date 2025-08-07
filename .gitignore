@@ -2,6 +2,7 @@
 .idea/
 __pycache__/
 .DS_Store
+.vscode/
 
 # compiled output or test output
 bin/
