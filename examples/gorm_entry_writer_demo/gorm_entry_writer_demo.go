@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -235,8 +236,8 @@ func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
 	// 	return w.handleListType(key, keyHash, actualData)
 	// case 2: // RDB_TYPE_SET
 	// 	return w.handleSetType(key, keyHash, actualData)
-	// case 3, 5: // RDB_TYPE_ZSET, RDB_TYPE_ZSET_2
-	// 	return w.handleZSetType(key, keyHash, actualData)
+	case 3, 5: // RDB_TYPE_ZSET, RDB_TYPE_ZSET_2
+		return w.handleZSetType(key, keyHash, actualData)
 	case 4: // RDB_TYPE_HASH
 		return w.handleHashType(key, keyHash, actualData)
 	// case 10: // RDB_TYPE_LIST_ZIPLIST
@@ -500,6 +501,85 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 		fmt.Printf("Saved hash field: key=%s, field=%s, value=%s\n", key, field, value)
 	}
 
+	return nil
+}
+
+// 处理 ZSet 类型 (RDB_TYPE_ZSET, RDB_TYPE_ZSET_2)
+func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
+	fmt.Printf("Handling ZSet for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
+
+	if len(data) == 0 {
+		fmt.Printf("Empty zset data for key %s\n", key)
+		return nil
+	}
+
+	pos := 0
+
+	// 首先读取有序集合的大小
+	zsetSize, bytesRead, err := w.decodeRDBLength(data, pos)
+	if err != nil {
+		return fmt.Errorf("failed to decode zset size for key %s: %v", key, err)
+	}
+	pos += bytesRead
+
+	fmt.Printf("ZSet size: %d entries\n", zsetSize)
+
+	// 解析每个 member-score 对
+	for i := 0; i < int(zsetSize); i++ {
+		// 解码 member
+		memberValue, err := w.decodeRDBString(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to decode zset member %d for key %s: %v", i, key, err)
+		}
+		member := string(memberValue.([]byte))
+
+		// 计算member消耗的字节数以移动位置
+		memberBytesUsed, err := w.calculateRDBStringLength(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to calculate member length for key %s: %v", key, err)
+		}
+		pos += memberBytesUsed
+
+		// 解码 score (8字节双精度浮点数, little-endian)
+		if pos+8 > len(data) {
+			return fmt.Errorf("insufficient data for zset score %d for key %s", i, key)
+		}
+
+		// 从8个字节构造double（IEEE 754格式，little-endian）
+		scoreBytes := make([]byte, 8)
+		for j := 0; j < 8; j++ {
+			scoreBytes[j] = byte(data[pos+j])
+		}
+		pos += 8
+
+		// 将字节转换为float64
+		// Go的math.Float64frombits期望big-endian，所以需要转换
+		var scoreBits uint64
+		for j := 0; j < 8; j++ {
+			scoreBits |= uint64(scoreBytes[j]) << (uint64(j) * 8)
+		}
+
+		score := math.Float64frombits(scoreBits)
+
+		// 保存到数据库
+		memberHash := w.calculateHash(member)
+		record := RedisZSet{
+			KeyHash:    keyHash,
+			Key:        key,
+			MemberHash: memberHash,
+			Member:     member,
+			Score:      score,
+			CreatedAt:  time.Now(),
+		}
+
+		if err := w.db.Save(&record).Error; err != nil {
+			return fmt.Errorf("failed to save zset member %s for key %s: %v", member, key, err)
+		}
+
+		fmt.Printf("Saved zset member %d: key=%s, member=%s, score=%f\n", i, key, member, score)
+	}
+
+	fmt.Printf("Successfully processed %d zset entries for key %s\n", zsetSize, key)
 	return nil
 }
 
