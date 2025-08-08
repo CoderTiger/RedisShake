@@ -102,7 +102,7 @@ func (w *GormEntryWriterDemo) Init(ctx context.Context, db *gorm.DB) error {
 }
 
 func (w *GormEntryWriterDemo) Write(e *common.Entry) error {
-	fmt.Printf("Writing entry: DbId=%d, CmdName=%s, Keys=%v, Group=%s\n", e.DbId, e.CmdName, e.Keys, e.Group)
+	w.db.Logger.Info(w.ctx, "Writing entry: DbId=%d, CmdName=%s, Keys=%v, Group=%s", e.DbId, e.CmdName, e.Keys, e.Group)
 	cmd := strings.ToLower(e.CmdName)
 	switch cmd {
 	case "restore": // sync with scan reader
@@ -393,10 +393,10 @@ func (w *GormEntryWriterDemo) handleStringType(key, keyHash, data string) error 
 
 // 处理 Hash 类型 (RDB_TYPE_HASH)
 func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
-	fmt.Printf("Handling Hash for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
+	w.db.Logger.Info(w.ctx, "Handling Hash for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	if len(data) == 0 {
-		fmt.Printf("Empty hash data for key %s\n", key)
+		w.db.Logger.Warn(w.ctx, "Empty hash data for key %s", key)
 		return nil
 	}
 
@@ -409,7 +409,7 @@ func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
 	}
 	pos += bytesRead
 
-	fmt.Printf("Hash size: %d entries\n", hashSize)
+	w.db.Logger.Info(w.ctx, "Hash size: %d entries for key %s", hashSize, key)
 
 	// 解析每个 field-value 对
 	for i := 0; i < int(hashSize); i++ {
@@ -456,15 +456,15 @@ func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
 			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
 		}
 
-		fmt.Printf("Saved hash field %d: key=%s, field=%s, value=%s\n", i, key, field, string(value))
+		w.db.Logger.Info(w.ctx, "Saved hash field %d: key=%s, field=%s, value=%s", i, key, field, string(value))
 	}
 
-	fmt.Printf("Successfully processed %d hash entries for key %s\n", hashSize, key)
+	w.db.Logger.Info(w.ctx, "Successfully processed %d hash entries for key %s", hashSize, key)
 	return nil
 }
 
 func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) error {
-	fmt.Printf("Handling Hash Listpack for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
+	w.db.Logger.Info(w.ctx, "Handling Hash Listpack for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	// 解析 Listpack 格式的 Hash 数据
 	entries, err := w.parseListpack(data)
@@ -474,10 +474,10 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 
 	// Hash Listpack 格式：field1, value1, field2, value2, ...
 	if len(entries)%2 != 0 {
-		fmt.Printf("Warning: odd number of entries (%d) for key %s, truncating last entry\n", len(entries), key)
+		w.db.Logger.Warn(w.ctx, "Odd number of entries (%d) for key %s, truncating last entry", len(entries), key)
 	}
 
-	fmt.Printf("Successfully parsed %d entries (%d field-value pairs) for key %s\n", len(entries), len(entries)/2, key)
+	w.db.Logger.Info(w.ctx, "Successfully parsed %d entries (%d field-value pairs) for key %s", len(entries), len(entries)/2, key)
 
 	// 逐对处理 field-value
 	for i := 0; i < len(entries); i += 2 {
@@ -498,7 +498,7 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
 		}
 
-		fmt.Printf("Saved hash field: key=%s, field=%s, value=%s\n", key, field, value)
+		w.db.Logger.Info(w.ctx, "Saved hash field: key=%s, field=%s, value=%s", key, field, value)
 	}
 
 	return nil
@@ -506,10 +506,10 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 
 // 处理 ZSet 类型 (RDB_TYPE_ZSET, RDB_TYPE_ZSET_2)
 func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
-	fmt.Printf("Handling ZSet for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
+	w.db.Logger.Info(w.ctx, "Handling ZSet for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	if len(data) == 0 {
-		fmt.Printf("Empty zset data for key %s\n", key)
+		w.db.Logger.Warn(w.ctx, "Empty zset data for key %s", key)
 		return nil
 	}
 
@@ -522,7 +522,7 @@ func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
 	}
 	pos += bytesRead
 
-	fmt.Printf("ZSet size: %d entries\n", zsetSize)
+	w.db.Logger.Info(w.ctx, "ZSet size: %d entries for key %s", zsetSize, key)
 
 	// 解析每个 member-score 对
 	for i := 0; i < int(zsetSize); i++ {
@@ -576,10 +576,10 @@ func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
 			return fmt.Errorf("failed to save zset member %s for key %s: %v", member, key, err)
 		}
 
-		fmt.Printf("Saved zset member %d: key=%s, member=%s, score=%f\n", i, key, member, score)
+		w.db.Logger.Info(w.ctx, "Saved zset member %d: key=%s, member=%s, score=%f", i, key, member, score)
 	}
 
-	fmt.Printf("Successfully processed %d zset entries for key %s\n", zsetSize, key)
+	w.db.Logger.Info(w.ctx, "Successfully processed %d zset entries for key %s", zsetSize, key)
 	return nil
 }
 
@@ -604,39 +604,41 @@ func (w *GormEntryWriterDemo) parseListpack(data string) ([]string, error) {
 			continue // 尝试下一个offset
 		}
 
-		fmt.Printf("Listpack info (offset %d): totalBytes=%d, size=%d, actualDataLen=%d\n", offset, totalBytes, size, len(data))
+		w.db.Logger.Info(w.ctx, "Parsing Listpack at offset %d: totalBytes=%d, size=%d", offset, totalBytes, size)
 
 		var elements []string
 
 		// 读取每个元素
 		for i := 0; i < size && pos < len(data)-1; i++ {
 			if pos >= len(data) {
-				fmt.Printf("Warning: reached end of data at entry %d, stopping parsing\n", i)
+				w.db.Logger.Warn(w.ctx, "Reached end of data while parsing listpack entry %d at position %d", i, pos)
 				break
 			}
 
 			element, nextPos, err := w.parseListpackEntry(data, pos)
 			if err != nil {
-				fmt.Printf("Warning: failed to parse listpack entry %d at position %d: %v, stopping parsing\n", i, pos, err)
+				w.db.Logger.Warn(w.ctx, "Failed to parse listpack entry %d at position %d: %v", i, pos, err)
 				break
 			}
 
 			if nextPos <= pos {
-				fmt.Printf("Warning: listpack entry %d did not advance position (pos=%d, nextPos=%d), stopping parsing\n", i, pos, nextPos)
+				w.db.Logger.Warn(w.ctx, "Next position %d is not greater than current position %d for entry %d", nextPos, pos, i)
 				break
 			}
 
 			elements = append(elements, element)
 			pos = nextPos
 
-			fmt.Printf("Parsed listpack entry %d: %s (nextPos=%d)\n", i, element, pos)
+			w.db.Logger.Info(w.ctx, "Parsed listpack entry %d: %s at position %d", i, element, pos)
 		}
 
 		// 如果解析到了预期数量的元素，就认为成功
 		if len(elements) == size {
 			// 验证结束标记（可选，因为可能没有）
 			if pos < len(data) && data[pos] != 0xFF {
-				fmt.Printf("Warning: expected listpack end marker 0xFF at position %d, got 0x%x\n", pos, data[pos])
+				w.db.Logger.Warn(w.ctx, "Listpack did not end with expected 0xFF byte at position %d", pos)
+			} else {
+				w.db.Logger.Info(w.ctx, "Successfully parsed Listpack with %d elements at offset %d", len(elements), offset)
 			}
 			return elements, nil
 		}
@@ -654,7 +656,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 	firstByte := data[pos]
 	pos++
 
-	fmt.Printf("Parsing listpack entry at pos %d, firstByte: 0x%02x\n", pos-1, firstByte)
+	w.db.Logger.Info(w.ctx, "Parsing Listpack entry at position %d with first byte: 0x%02X", pos-1, firstByte)
 
 	// 按照 Redis Listpack 编码规范的优先级顺序解析
 	if (firstByte & 0x80) == 0x00 { // 7位无符号整数: 0xxxxxxx
@@ -680,7 +682,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 6-bit string (len=%d): %s\n", length, value)
+		w.db.Logger.Info(w.ctx, "Parsed 6-bit string (len=%d): %s at position %d", length, value, pos)
 		return value, pos, nil
 
 	} else if (firstByte & 0xE0) == 0xC0 { // 13位有符号整数: 110xxxxx
@@ -701,7 +703,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 13-bit int: %d\n", value)
+		w.db.Logger.Info(w.ctx, "Parsed 13-bit int: %d at position %d", value, pos)
 		return strconv.FormatInt(value, 10), pos, nil
 
 	} else if (firstByte & 0xF0) == 0xE0 { // 12位字符串长度: 1110xxxx
@@ -723,7 +725,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 12-bit string (len=%d): %s\n", length, value)
+		w.db.Logger.Info(w.ctx, "Parsed 12-bit string (len=%d): %s at position %d", length, value, pos)
 		return value, pos, nil
 
 	} else if firstByte == 0xF0 { // 32位字符串长度
@@ -743,7 +745,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 32-bit string (len=%d): %s\n", length, value)
+		w.db.Logger.Info(w.ctx, "Parsed 32-bit string (len=%d): %s at position %d", length, value, pos)
 		return value, pos, nil
 
 	} else if firstByte == 0xF1 { // 16位有符号整数
@@ -762,7 +764,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 16-bit int: %d\n", value)
+		w.db.Logger.Info(w.ctx, "Parsed 16-bit int: %d at position %d", value, pos)
 		return strconv.FormatInt(value, 10), pos, nil
 
 	} else if firstByte == 0xF2 { // 24位有符号整数
@@ -781,7 +783,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 24-bit int: %d\n", value)
+		w.db.Logger.Info(w.ctx, "Parsed 24-bit int: %d at position %d", value, pos)
 		return strconv.FormatInt(value, 10), pos, nil
 
 	} else if firstByte == 0xF3 { // 32位有符号整数
@@ -800,7 +802,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 32-bit int: %d\n", value)
+		w.db.Logger.Info(w.ctx, "Parsed 32-bit int: %d at position %d", value, pos)
 		return strconv.FormatInt(value, 10), pos, nil
 
 	} else if firstByte == 0xF4 { // 64位有符号整数
@@ -816,7 +818,7 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 64-bit int: %d\n", value)
+		w.db.Logger.Info(w.ctx, "Parsed 64-bit int: %d at position %d", value, pos)
 		return strconv.FormatInt(value, 10), pos, nil
 
 	} else {
