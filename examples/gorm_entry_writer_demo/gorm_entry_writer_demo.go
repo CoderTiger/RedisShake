@@ -249,8 +249,8 @@ func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
 	// 	return w.handleHashZiplistType(key, keyHash, actualData)
 	// case 14, 18: // RDB_TYPE_LIST_QUICKLIST, RDB_TYPE_LIST_QUICKLIST_2
 	// 	return w.handleListQuicklistType(key, keyHash, actualData)
-	// case 16: // RDB_TYPE_HASH_LISTPACK
-	// 	return w.handleHashListpackType(key, keyHash, actualData)
+	case 16: // RDB_TYPE_HASH_LISTPACK
+		return w.handleHashListpackType(key, keyHash, actualData)
 	// case 17: // RDB_TYPE_ZSET_LISTPACK
 	// 	return w.handleZSetListpackType(key, keyHash, actualData)
 	// case 20: // RDB_TYPE_SET_LISTPACK
@@ -285,174 +285,314 @@ func (w *GormEntryWriterDemo) handleStringType(key, keyHash, data string) error 
 	return w.db.Save(&record).Error
 }
 
-// 处理 Hash 类型 (简化实现，假设是原始格式)
-func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
-	// 这里需要根据 RDB 格式解析哈希数据
-	// 简化实现：假设数据格式为 "field1\x00value1\x00field2\x00value2..."
-	parts := strings.Split(data, "\x00")
+func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) error {
+	fmt.Printf("Handling Hash Listpack for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
 
-	if len(parts) < 2 || len(parts)%2 != 0 {
-		return fmt.Errorf("invalid hash data format for key %s", key)
+	// 解析 Listpack 格式的 Hash 数据
+	entries, err := w.parseListpack(data)
+	if err != nil {
+		return fmt.Errorf("failed to parse listpack for key %s: %v", key, err)
 	}
 
-	for i := 0; i < len(parts)-1; i += 2 {
-		field := parts[i]
-		value := parts[i+1]
-		decodedValue, err := w.decodeRDBString(value)
-		if err != nil {
-			return fmt.Errorf("failed to decode RDB string for field %s in key %s: %v", field, key, err)
-		}
+	// Hash Listpack 格式：field1, value1, field2, value2, ...
+	if len(entries)%2 != 0 {
+		fmt.Printf("Warning: odd number of entries (%d) for key %s, truncating last entry\n", len(entries), key)
+	}
+
+	fmt.Printf("Successfully parsed %d entries (%d field-value pairs) for key %s\n", len(entries), len(entries)/2, key)
+
+	// 逐对处理 field-value
+	for i := 0; i < len(entries); i += 2 {
+		field := entries[i]
+		value := entries[i+1]
 
 		fieldHash := w.calculateHash(field)
 		record := RedisHash{
 			KeyHash:   keyHash,
 			Key:       key,
 			FieldHash: fieldHash,
-			// Field:     base64.StdEncoding.EncodeToString([]byte(field)),
-			// Value:     base64.StdEncoding.EncodeToString([]byte(value)),
 			Field:     field,
-			Value:     decodedValue.([]byte),
+			Value:     []byte(value),
 			CreatedAt: time.Now(),
 		}
 
-		if err := w.db.Create(&record).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// 处理 List 类型 (简化实现)
-func (w *GormEntryWriterDemo) handleListType(key, keyHash, data string) error {
-	// 简化实现：假设数据格式为 "value1\x00value2\x00value3..."
-	values := strings.Split(data, "\x00")
-
-	for i, value := range values {
-		if value == "" {
-			continue
+		if err := w.db.Save(&record).Error; err != nil {
+			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
 		}
 
-		decodedValue, err := w.decodeRDBString(value)
-		if err != nil {
-			return fmt.Errorf("failed to decode RDB string for value %s in key %s: %v", value, key, err)
-		}
-
-		record := RedisList{
-			KeyHash:   keyHash,
-			Key:       key,
-			Position:  uint(i),
-			Value:     decodedValue.([]byte),
-			CreatedAt: time.Now(),
-		}
-
-		if err := w.db.Create(&record).Error; err != nil {
-			return err
-		}
+		fmt.Printf("Saved hash field: key=%s, field=%s, value=%s\n", key, field, value)
 	}
 
 	return nil
 }
 
-// 处理 Set 类型 (简化实现)
-func (w *GormEntryWriterDemo) handleSetType(key, keyHash, data string) error {
-	// 简化实现：假设数据格式为 "member1\x00member2\x00member3..."
-	members := strings.Split(data, "\x00")
+// parseListpack 解析 Listpack 格式的数据
+func (w *GormEntryWriterDemo) parseListpack(data string) ([]string, error) {
+	if len(data) < 7 { // 至少需要 header(6字节) + 结束符(1字节)
+		return nil, fmt.Errorf("listpack data too short: %d bytes", len(data))
+	}
 
-	for _, member := range members {
-		if member == "" {
-			continue
+	// 尝试从不同位置开始解析，因为可能有前缀字节
+	for offset := 0; offset <= 2 && offset < len(data)-6; offset++ {
+		pos := offset
+
+		// 读取 Listpack 头部
+		totalBytes := int(data[pos]) | int(data[pos+1])<<8 | int(data[pos+2])<<16 | int(data[pos+3])<<24
+		pos += 4
+		size := int(data[pos]) | int(data[pos+1])<<8
+		pos += 2
+
+		// 检查这个解析是否合理
+		if totalBytes > 1000 || size > 100 || totalBytes < 6 {
+			continue // 尝试下一个offset
 		}
 
-		memberHash := w.calculateHash(member)
-		record := RedisSet{
-			KeyHash:    keyHash,
-			Key:        key,
-			MemberHash: memberHash,
-			Member:     member,
-			CreatedAt:  time.Now(),
+		fmt.Printf("Listpack info (offset %d): totalBytes=%d, size=%d, actualDataLen=%d\n", offset, totalBytes, size, len(data))
+
+		var elements []string
+
+		// 读取每个元素
+		for i := 0; i < size && pos < len(data)-1; i++ {
+			if pos >= len(data) {
+				fmt.Printf("Warning: reached end of data at entry %d, stopping parsing\n", i)
+				break
+			}
+
+			element, nextPos, err := w.parseListpackEntry(data, pos)
+			if err != nil {
+				fmt.Printf("Warning: failed to parse listpack entry %d at position %d: %v, stopping parsing\n", i, pos, err)
+				break
+			}
+
+			if nextPos <= pos {
+				fmt.Printf("Warning: listpack entry %d did not advance position (pos=%d, nextPos=%d), stopping parsing\n", i, pos, nextPos)
+				break
+			}
+
+			elements = append(elements, element)
+			pos = nextPos
+
+			fmt.Printf("Parsed listpack entry %d: %s (nextPos=%d)\n", i, element, pos)
 		}
 
-		if err := w.db.Create(&record).Error; err != nil {
-			return err
+		// 如果解析到了预期数量的元素，就认为成功
+		if len(elements) == size {
+			// 验证结束标记（可选，因为可能没有）
+			if pos < len(data) && data[pos] != 0xFF {
+				fmt.Printf("Warning: expected listpack end marker 0xFF at position %d, got 0x%x\n", pos, data[pos])
+			}
+			return elements, nil
 		}
 	}
 
-	return nil
+	return nil, fmt.Errorf("failed to parse listpack with any offset")
 }
 
-// 处理 ZSet 类型 (简化实现)
-func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
-	// 简化实现：假设数据格式为 "member1\x00score1\x00member2\x00score2..."
-	parts := strings.Split(data, "\x00")
-
-	for i := 0; i < len(parts)-1; i += 2 {
-		member := parts[i]
-		scoreStr := parts[i+1]
-
-		score, err := strconv.ParseFloat(scoreStr, 64)
-		if err != nil {
-			w.db.Logger.Warn(w.ctx, "Invalid score for ZSet member %s: %s", member, scoreStr)
-			continue
-		}
-		memberHash := w.calculateHash(member)
-		record := RedisZSet{
-			KeyHash:    keyHash,
-			Key:        key,
-			MemberHash: memberHash,
-			Member:     member,
-			Score:      score,
-			CreatedAt:  time.Now(),
-		}
-
-		if err := w.db.Create(&record).Error; err != nil {
-			return err
-		}
+// parseListpackEntry 解析单个 Listpack 条目
+func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, int, error) {
+	if pos >= len(data) {
+		return "", pos, fmt.Errorf("position %d exceeds data length %d", pos, len(data))
 	}
 
-	return nil
+	firstByte := data[pos]
+	pos++
+
+	fmt.Printf("Parsing listpack entry at pos %d, firstByte: 0x%02x\n", pos-1, firstByte)
+
+	// 按照 Redis Listpack 编码规范的优先级顺序解析
+	if (firstByte & 0x80) == 0x00 { // 7位无符号整数: 0xxxxxxx
+		value := int64(firstByte & 0x7F)
+		entryLen := 1
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 7-bit uint: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else if (firstByte & 0xC0) == 0x80 { // 6位字符串长度: 10xxxxxx
+		length := int(firstByte & 0x3F)
+		if pos+length > len(data) {
+			return "", pos, fmt.Errorf("6-bit string length %d exceeds remaining data at position %d (data length: %d)", length, pos, len(data))
+		}
+		value := data[pos : pos+length]
+		pos += length
+
+		entryLen := 1 + length
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 6-bit string (len=%d): %s\n", length, value)
+		return value, pos, nil
+
+	} else if (firstByte & 0xE0) == 0xC0 { // 13位有符号整数: 110xxxxx
+		if pos >= len(data) {
+			return "", pos, fmt.Errorf("13-bit int missing second byte")
+		}
+		secondByte := data[pos]
+		pos++
+
+		value := int64(firstByte&0x1F)<<8 | int64(secondByte)
+		// 处理负数 (13位补码)
+		if value >= (1 << 12) {
+			value = value - (1 << 13)
+		}
+
+		entryLen := 2
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 13-bit int: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else if (firstByte & 0xF0) == 0xE0 { // 12位字符串长度: 1110xxxx
+		if pos >= len(data) {
+			return "", pos, fmt.Errorf("12-bit string missing second byte")
+		}
+		secondByte := data[pos]
+		pos++
+
+		length := (int(firstByte&0x0F) << 8) | int(secondByte)
+		if pos+length > len(data) {
+			return "", pos, fmt.Errorf("12-bit string length %d exceeds remaining data", length)
+		}
+		value := data[pos : pos+length]
+		pos += length
+
+		entryLen := 2 + length
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 12-bit string (len=%d): %s\n", length, value)
+		return value, pos, nil
+
+	} else if firstByte == 0xF0 { // 32位字符串长度
+		if pos+4 > len(data) {
+			return "", pos, fmt.Errorf("32-bit string missing length bytes")
+		}
+		length := int(data[pos]) | int(data[pos+1])<<8 | int(data[pos+2])<<16 | int(data[pos+3])<<24
+		pos += 4
+		if pos+length > len(data) {
+			return "", pos, fmt.Errorf("32-bit string length %d exceeds remaining data", length)
+		}
+		value := data[pos : pos+length]
+		pos += length
+
+		entryLen := 5 + length
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 32-bit string (len=%d): %s\n", length, value)
+		return value, pos, nil
+
+	} else if firstByte == 0xF1 { // 16位有符号整数
+		if pos+2 > len(data) {
+			return "", pos, fmt.Errorf("16-bit int missing bytes")
+		}
+		value := int64(data[pos]) | int64(data[pos+1])<<8
+		pos += 2
+		// 处理负数 (16位补码)
+		if value >= (1 << 15) {
+			value = value - (1 << 16)
+		}
+
+		entryLen := 3
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 16-bit int: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else if firstByte == 0xF2 { // 24位有符号整数
+		if pos+3 > len(data) {
+			return "", pos, fmt.Errorf("24-bit int missing bytes")
+		}
+		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16
+		pos += 3
+		// 处理负数 (24位补码)
+		if value >= (1 << 23) {
+			value = value - (1 << 24)
+		}
+
+		entryLen := 4
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 24-bit int: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else if firstByte == 0xF3 { // 32位有符号整数
+		if pos+4 > len(data) {
+			return "", pos, fmt.Errorf("32-bit int missing bytes")
+		}
+		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16 | int64(data[pos+3])<<24
+		pos += 4
+		// 处理负数 (32位补码)
+		if value >= (1 << 31) {
+			value = value - (1 << 32)
+		}
+
+		entryLen := 5
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 32-bit int: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else if firstByte == 0xF4 { // 64位有符号整数
+		if pos+8 > len(data) {
+			return "", pos, fmt.Errorf("64-bit int missing bytes")
+		}
+		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16 | int64(data[pos+3])<<24 |
+			int64(data[pos+4])<<32 | int64(data[pos+5])<<40 | int64(data[pos+6])<<48 | int64(data[pos+7])<<56
+		pos += 8
+
+		entryLen := 9
+		backLengthBytes := w.skipBackLength(data, pos, entryLen)
+		if pos+backLengthBytes <= len(data) {
+			pos += backLengthBytes
+		}
+		fmt.Printf("Parsed 64-bit int: %d\n", value)
+		return strconv.FormatInt(value, 10), pos, nil
+
+	} else {
+		return "", pos, fmt.Errorf("unknown listpack encoding: 0x%x at position %d", firstByte, pos-1)
+	}
 }
 
-// 以下是各种编码格式的处理方法，这里提供简化实现
-// 实际项目中需要根据 Redis RDB 格式规范来正确解析
+// skipBackLength 跳过 Listpack 条目的后向长度字段
+func (w *GormEntryWriterDemo) skipBackLength(data string, pos int, entryLen int) int {
+	// Listpack 后向长度编码规则：
+	// 1-127 字节：1字节编码
+	// 128-16383 字节：2字节编码
+	// 16384-2097151 字节：3字节编码
+	// 2097152-268435455 字节：4字节编码
+	// >268435455 字节：5字节编码
 
-func (w *GormEntryWriterDemo) handleListZiplistType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 List 处理
-	return w.handleListType(key, keyHash, data)
-}
+	// 但是需要检查实际的后向长度字节内容来确定
+	if pos >= len(data) {
+		return 0
+	}
 
-func (w *GormEntryWriterDemo) handleSetIntsetType(key, keyHash, data string) error {
-	// 简化实现，解析整数集合
-	// 这里需要根据 intset 格式解析，暂时用简化方式
-	return w.handleSetType(key, keyHash, data)
-}
+	backLengthByte := data[pos]
 
-func (w *GormEntryWriterDemo) handleZSetZiplistType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 ZSet 处理
-	return w.handleZSetType(key, keyHash, data)
-}
-
-func (w *GormEntryWriterDemo) handleHashZiplistType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 Hash 处理
-	return w.handleHashType(key, keyHash, data)
-}
-
-func (w *GormEntryWriterDemo) handleListQuicklistType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 List 处理
-	return w.handleListType(key, keyHash, data)
-}
-
-func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) error {
-	fmt.Printf("Handling Hash Listpack for key %s with data: %s, data-hex: %x\n", key, data, data)
-	// 简化实现，直接当作普通 Hash 处理
-	return w.handleHashType(key, keyHash, data)
-}
-
-func (w *GormEntryWriterDemo) handleZSetListpackType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 ZSet 处理
-	return w.handleZSetType(key, keyHash, data)
-}
-
-func (w *GormEntryWriterDemo) handleSetListpackType(key, keyHash, data string) error {
-	// 简化实现，直接当作普通 Set 处理
-	return w.handleSetType(key, keyHash, data)
+	// 第一字节的最高位决定了后向长度字段的字节数
+	if (backLengthByte & 0x80) == 0 { // 0xxxxxxx - 1字节
+		return 1
+	} else if (backLengthByte & 0xC0) == 0x80 { // 10xxxxxx - 2字节
+		return 2
+	} else if (backLengthByte & 0xE0) == 0xC0 { // 110xxxxx - 3字节
+		return 3
+	} else if (backLengthByte & 0xF0) == 0xE0 { // 1110xxxx - 4字节
+		return 4
+	} else { // 11110xxx - 5字节
+		return 5
+	}
 }
