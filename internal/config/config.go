@@ -63,6 +63,11 @@ type AdvancedOptions struct {
 	TargetRedisClientMaxQuerybufLen int64  `mapstructure:"target_redis_client_max_querybuf_len" default:"1024000000"`
 	TargetRedisProtoMaxBulkLen      uint64 `mapstructure:"target_redis_proto_max_bulk_len" default:"512000000"`
 
+	// Redis client connection timeouts (in seconds)
+	RedisConnectTimeoutSec int `mapstructure:"redis_connect_timeout_sec" default:"1"` // TCP connection timeout
+	RedisReadTimeoutSec    int `mapstructure:"redis_read_timeout_sec" default:"300"`  // Read operation timeout (5 minutes)
+	RedisWriteTimeoutSec   int `mapstructure:"redis_write_timeout_sec" default:"300"` // Write operation timeout (5 minutes)
+
 	AwsPSync string `mapstructure:"aws_psync" default:""` // 10.0.0.1:6379@nmfu2sl5osync,10.0.0.1:6379@xhma21xfkssync
 
 	EmptyDBBeforeSync bool `mapstructure:"empty_db_before_sync" default:"false"`

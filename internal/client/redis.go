@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"RedisShake/internal/client/proto"
+	"RedisShake/internal/config"
 	"RedisShake/internal/log"
 )
 
@@ -37,7 +38,10 @@ func NewRedisClient(ctx context.Context, address string, username string, passwo
 		Timeout:   5 * time.Minute,
 		KeepAlive: 5 * time.Minute,
 	}
-	ctxWithDeadline, cancel := context.WithTimeout(ctx, 1*time.Second)
+
+	// Use configurable connect timeout
+	connectTimeout := time.Duration(config.Opt.Advanced.RedisConnectTimeoutSec) * time.Second
+	ctxWithDeadline, cancel := context.WithTimeout(ctx, connectTimeout)
 	defer cancel()
 	var err error
 	if Tls {
@@ -53,7 +57,16 @@ func NewRedisClient(ctx context.Context, address string, username string, passwo
 		log.Panicf("dial failed. address=[%s], tls=[%v], err=[%v]", address, Tls, err)
 	}
 
-	r.conn = conn
+	// Set read and write timeouts for the connection
+	readTimeout := time.Duration(config.Opt.Advanced.RedisReadTimeoutSec) * time.Second
+	writeTimeout := time.Duration(config.Opt.Advanced.RedisWriteTimeoutSec) * time.Second
+
+	// Create a wrapper that applies timeouts to the connection
+	r.conn = &timeoutConn{
+		Conn:         conn,
+		readTimeout:  readTimeout,
+		writeTimeout: writeTimeout,
+	}
 	// Increase the size of the underlying TCP send cache to avoid short-write errors
 	r.reader = bufio.NewReader(conn)
 	r.writer = bufio.NewWriterSize(conn, 32*1024) // size is 32KiB
@@ -283,4 +296,29 @@ func (r *Redis) Scan(cursor uint64, count int) (newCursor uint64, keys []string)
 		keys = append(keys, item.(string))
 	}
 	return
+}
+
+// timeoutConn wraps a net.Conn to add read and write timeouts
+type timeoutConn struct {
+	net.Conn
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+}
+
+func (tc *timeoutConn) Read(b []byte) (int, error) {
+	if tc.readTimeout > 0 {
+		if err := tc.Conn.SetReadDeadline(time.Now().Add(tc.readTimeout)); err != nil {
+			return 0, err
+		}
+	}
+	return tc.Conn.Read(b)
+}
+
+func (tc *timeoutConn) Write(b []byte) (int, error) {
+	if tc.writeTimeout > 0 {
+		if err := tc.Conn.SetWriteDeadline(time.Now().Add(tc.writeTimeout)); err != nil {
+			return 0, err
+		}
+	}
+	return tc.Conn.Write(b)
 }
