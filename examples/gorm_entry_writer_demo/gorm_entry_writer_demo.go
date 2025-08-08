@@ -237,8 +237,8 @@ func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
 	// 	return w.handleSetType(key, keyHash, actualData)
 	// case 3, 5: // RDB_TYPE_ZSET, RDB_TYPE_ZSET_2
 	// 	return w.handleZSetType(key, keyHash, actualData)
-	// case 4: // RDB_TYPE_HASH
-	// 	return w.handleHashType(key, keyHash, actualData)
+	case 4: // RDB_TYPE_HASH
+		return w.handleHashType(key, keyHash, actualData)
 	// case 10: // RDB_TYPE_LIST_ZIPLIST
 	// 	return w.handleListZiplistType(key, keyHash, actualData)
 	// case 11: // RDB_TYPE_SET_INTSET
@@ -267,6 +267,111 @@ func (w *GormEntryWriterDemo) calculateHash(s string) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// decodeRDBLength 解码 RDB 长度编码
+func (w *GormEntryWriterDemo) decodeRDBLength(data string, pos int) (int64, int, error) {
+	if pos >= len(data) {
+		return 0, 0, fmt.Errorf("position %d exceeds data length %d", pos, len(data))
+	}
+
+	firstByte := data[pos]
+	encoding := (firstByte & 0xC0) >> 6 // 获取前两位
+
+	switch encoding {
+	case 0: // 00xxxxxx - 6位长度
+		length := int64(firstByte & 0x3F)
+		return length, 1, nil
+
+	case 1: // 01xxxxxx - 14位长度
+		if pos+1 >= len(data) {
+			return 0, 0, fmt.Errorf("data too short for 14-bit length encoding")
+		}
+		length := int64(firstByte&0x3F)<<8 | int64(data[pos+1])
+		return length, 2, nil
+
+	case 2: // 10xxxxxx - 32位长度
+		if pos+4 >= len(data) {
+			return 0, 0, fmt.Errorf("data too short for 32-bit length encoding")
+		}
+		length := int64(data[pos+1])<<24 | int64(data[pos+2])<<16 | int64(data[pos+3])<<8 | int64(data[pos+4])
+		return length, 5, nil
+
+	case 3: // 11xxxxxx - 特殊编码（这里应该是长度，不是特殊格式）
+		format := firstByte & 0x3F
+		switch format {
+		case 0: // 后面跟8位整数表示长度
+			if pos+1 >= len(data) {
+				return 0, 0, fmt.Errorf("data too short for 8-bit length")
+			}
+			return int64(data[pos+1]), 2, nil
+		case 1: // 后面跟16位整数表示长度
+			if pos+2 >= len(data) {
+				return 0, 0, fmt.Errorf("data too short for 16-bit length")
+			}
+			length := int64(data[pos+1]) | int64(data[pos+2])<<8
+			return length, 3, nil
+		case 2: // 后面跟32位整数表示长度
+			if pos+4 >= len(data) {
+				return 0, 0, fmt.Errorf("data too short for 32-bit length")
+			}
+			length := int64(data[pos+1]) | int64(data[pos+2])<<8 | int64(data[pos+3])<<16 | int64(data[pos+4])<<24
+			return length, 5, nil
+		default:
+			return 0, 0, fmt.Errorf("unknown length encoding format: %d", format)
+		}
+
+	default:
+		return 0, 0, fmt.Errorf("invalid length encoding: %d", encoding)
+	}
+}
+
+// calculateRDBStringLength 计算 RDB 字符串编码占用的字节数
+func (w *GormEntryWriterDemo) calculateRDBStringLength(data string) (int, error) {
+	if len(data) == 0 {
+		return 0, fmt.Errorf("empty data")
+	}
+
+	firstByte := data[0]
+	encoding := (firstByte & 0xC0) >> 6 // 获取前两位
+
+	switch encoding {
+	case 0: // 00xxxxxx - 6位长度
+		length := int(firstByte & 0x3F)
+		return 1 + length, nil
+
+	case 1: // 01xxxxxx - 14位长度
+		if len(data) < 2 {
+			return 0, fmt.Errorf("data too short for 14-bit length encoding")
+		}
+		length := int(firstByte&0x3F)<<8 | int(data[1])
+		return 2 + length, nil
+
+	case 2: // 10xxxxxx - 32位长度
+		if len(data) < 5 {
+			return 0, fmt.Errorf("data too short for 32-bit length encoding")
+		}
+		length := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
+		return 5 + length, nil
+
+	case 3: // 11xxxxxx - 特殊编码
+		format := firstByte & 0x3F
+		switch format {
+		case 0: // 8位整数
+			return 2, nil
+		case 1: // 16位整数
+			return 3, nil
+		case 2: // 32位整数
+			return 5, nil
+		case 3: // LZF压缩字符串
+			return 0, fmt.Errorf("LZF compressed strings not supported")
+		default:
+			return 0, fmt.Errorf("unknown special encoding format: %d", format)
+		}
+
+	default:
+		return 0, fmt.Errorf("invalid encoding: %d", encoding)
+	}
+}
+
 // 处理 String 类型
 func (w *GormEntryWriterDemo) handleStringType(key, keyHash, data string) error {
 	// 解码 RDB 字符串数据，移除长度编码前缀
@@ -283,6 +388,78 @@ func (w *GormEntryWriterDemo) handleStringType(key, keyHash, data string) error 
 	}
 
 	return w.db.Save(&record).Error
+}
+
+// 处理 Hash 类型 (RDB_TYPE_HASH)
+func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
+	fmt.Printf("Handling Hash for key %s with data length: %d, data-hex: %x\n", key, len(data), data)
+
+	if len(data) == 0 {
+		fmt.Printf("Empty hash data for key %s\n", key)
+		return nil
+	}
+
+	pos := 0
+
+	// 首先读取哈希表的大小
+	hashSize, bytesRead, err := w.decodeRDBLength(data, pos)
+	if err != nil {
+		return fmt.Errorf("failed to decode hash size for key %s: %v", key, err)
+	}
+	pos += bytesRead
+
+	fmt.Printf("Hash size: %d entries\n", hashSize)
+
+	// 解析每个 field-value 对
+	for i := 0; i < int(hashSize); i++ {
+		// 解码 field
+		fieldValue, err := w.decodeRDBString(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to decode hash field %d for key %s: %v", i, key, err)
+		}
+		field := string(fieldValue.([]byte))
+
+		// 计算field消耗的字节数以移动位置
+		fieldBytesUsed, err := w.calculateRDBStringLength(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to calculate field length for key %s: %v", key, err)
+		}
+		pos += fieldBytesUsed
+
+		// 解码 value
+		valueData, err := w.decodeRDBString(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to decode hash value %d for key %s: %v", i, key, err)
+		}
+		value := valueData.([]byte)
+
+		// 计算value消耗的字节数以移动位置
+		valueBytesUsed, err := w.calculateRDBStringLength(data[pos:])
+		if err != nil {
+			return fmt.Errorf("failed to calculate value length for key %s: %v", key, err)
+		}
+		pos += valueBytesUsed
+
+		// 保存到数据库
+		fieldHash := w.calculateHash(field)
+		record := RedisHash{
+			KeyHash:   keyHash,
+			Key:       key,
+			FieldHash: fieldHash,
+			Field:     field,
+			Value:     value,
+			CreatedAt: time.Now(),
+		}
+
+		if err := w.db.Save(&record).Error; err != nil {
+			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
+		}
+
+		fmt.Printf("Saved hash field %d: key=%s, field=%s, value=%s\n", i, key, field, string(value))
+	}
+
+	fmt.Printf("Successfully processed %d hash entries for key %s\n", hashSize, key)
+	return nil
 }
 
 func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) error {
