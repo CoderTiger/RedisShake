@@ -96,28 +96,31 @@ func createDB(opts *GormWriterOptions) *gorm.DB {
 	return db
 }
 
-func loadPlugins(ctx context.Context, opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
+func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
 	var plugins []*common.GormEntryWriter
 	for _, pluginPath := range opts.Plugins {
 		pluginObj, err := plugin.Open(pluginPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open plugin %s: %w", pluginPath, err)
+			log.Panicf("failed to open plugin %s: %v", pluginPath, err)
 		}
 
-		newWriterFuncSym, err := pluginObj.Lookup("NewGormEntryWriter")
+		newWriterFuncSym, err := pluginObj.Lookup("NewWriter")
 		if err != nil {
-			return nil, fmt.Errorf("plugin %s does not export 'Plugin' symbol: %w", pluginPath, err)
+			log.Panicf("plugin %s does not export 'NewWriter' symbol: %v", pluginPath, err)
 		}
 
-		newWriterFunc, ok := newWriterFuncSym.(func() common.GormEntryWriter)
+		newWriterFunc, ok := newWriterFuncSym.(func(db *gorm.DB, infoF, warnF, errorF, panicF func(msg string, args ...interface{})) common.GormEntryWriter)
 		if !ok {
-			return nil, fmt.Errorf("plugin %s does not export 'NewGormEntryWriter' function with correct signature", pluginPath)
+			log.Panicf("plugin %s does not export 'NewWriter' function with correct signature", pluginPath)
 		}
 
-		p := newWriterFunc()
+		p := newWriterFunc(db, log.Debugf, log.Infof, log.Warnf, log.Panicf)
+		if p == nil {
+			log.Panicf("plugin %s returned nil writer", pluginPath)
+		}
 
-		if err := p.Init(ctx, db); err != nil {
-			return nil, fmt.Errorf("failed to initialize plugin %s: %w", pluginPath, err)
+		if err := p.Init(); err != nil {
+			log.Panicf("plugin %s failed to initialize: %v", pluginPath, err)
 		}
 
 		log.Infof("Loaded plugin: %s", pluginPath)
@@ -136,7 +139,7 @@ func NewGormWriter(ctx context.Context, opts *GormWriterOptions) Writer {
 	}
 	w := &gormWriter{}
 	w.db = createDB(opts)
-	plugins, err := loadPlugins(ctx, opts, w.db)
+	plugins, err := loadPlugins(opts, w.db)
 	if err != nil {
 		log.Panicf("%v", err)
 	}

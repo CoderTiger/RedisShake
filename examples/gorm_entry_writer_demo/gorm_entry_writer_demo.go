@@ -2,11 +2,9 @@ package main
 
 import (
 	"RedisShake/common"
-	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -16,8 +14,11 @@ import (
 )
 
 type GormEntryWriterDemo struct {
-	ctx context.Context
-	db  *gorm.DB
+	db     *gorm.DB
+	debugF func(msg string, args ...interface{})
+	infoF  func(msg string, args ...interface{})
+	warnF  func(msg string, args ...interface{})
+	panicF func(msg string, args ...interface{})
 }
 
 // 数据库表结构体定义
@@ -68,10 +69,15 @@ func (RedisList) TableName() string   { return "redis_list" }
 func (RedisSet) TableName() string    { return "redis_set" }
 func (RedisZSet) TableName() string   { return "redis_zset" }
 
-func NewGormEntryWriter() common.GormEntryWriter {
-	return &GormEntryWriterDemo{
-		db: nil, // This will be initialized later
+func NewWriter(db *gorm.DB, debugF, infoF, warnF, panicF func(msg string, args ...interface{})) common.GormEntryWriter {
+	demo := &GormEntryWriterDemo{
+		db:     db,
+		debugF: debugF,
+		infoF:  infoF,
+		warnF:  warnF,
+		panicF: panicF,
 	}
+	return demo
 }
 
 //go:embed assets/sql/*.sql
@@ -84,25 +90,21 @@ var sqlFileNames = []string{
 	"redis_set.sql",
 	"redis_zset.sql"}
 
-func (w *GormEntryWriterDemo) Init(ctx context.Context, db *gorm.DB) error {
-	w.ctx = ctx
-	w.db = db
-
+func (w *GormEntryWriterDemo) Init() error {
 	for _, fileName := range sqlFileNames {
 		data, err := sqlFS.ReadFile("assets/sql/" + fileName)
 		if err != nil {
-			return fmt.Errorf("failed to read SQL file %s: %w", fileName, err)
+			w.panicF("failed to read SQL file %s: %w", fileName, err)
 		}
-		if err := db.Exec(string(data)).Error; err != nil {
-			return fmt.Errorf("failed to execute SQL from %s: %w", fileName, err)
+		if err := w.db.Exec(string(data)).Error; err != nil {
+			w.panicF("failed to execute SQL from %s: %w", fileName, err)
 		}
 	}
-
 	return nil
 }
 
 func (w *GormEntryWriterDemo) Write(e *common.Entry) error {
-	w.db.Logger.Info(w.ctx, "Writing entry: DbId=%d, CmdName=%s, Keys=%v, Group=%s", e.DbId, e.CmdName, e.Keys, e.Group)
+	w.debugF("Writing entry: DbId=%d, CmdName=%s, Keys=%v, Group=%s", e.DbId, e.CmdName, e.Keys, e.Group)
 	cmd := strings.ToLower(e.CmdName)
 	switch cmd {
 	case "restore": // sync with scan reader
@@ -111,9 +113,9 @@ func (w *GormEntryWriterDemo) Write(e *common.Entry) error {
 		}
 	case "ping":
 		// todo: implement the logic to handle the ping command
-		w.db.Logger.Info(w.ctx, "Handling ping command for entry with DbId=%d", e.DbId)
+		w.infoF("Handling ping command for entry with DbId=%d", e.DbId)
 	default:
-		w.db.Logger.Info(w.ctx, "Skipping unsupported command %s for entry with DbId=%d, Keys=%v", cmd, e.DbId, e.Keys)
+		w.infoF("Skipping unsupported command %s for entry with DbId=%d, Keys=%v", cmd, e.DbId, e.Keys)
 	}
 
 	return nil
@@ -124,9 +126,9 @@ func (w *GormEntryWriterDemo) Close() error {
 	return nil
 }
 
-func (w *GormEntryWriterDemo) decodeRDBString(data string) (any, any) {
+func (w *GormEntryWriterDemo) decodeRDBString(data string) []byte {
 	if len(data) == 0 {
-		return []byte{}, nil
+		return []byte{}
 	}
 
 	// RDB 字符串编码格式:
@@ -142,65 +144,67 @@ func (w *GormEntryWriterDemo) decodeRDBString(data string) (any, any) {
 	case 0: // 00xxxxxx - 6位长度
 		length := int(firstByte & 0x3F)
 		if len(data) < 1+length {
-			return nil, fmt.Errorf("data too short for 6-bit length encoding")
+			w.panicF("data too short for 6-bit length encoding")
 		}
-		return []byte(data[1 : 1+length]), nil
+		return []byte(data[1 : 1+length])
 
 	case 1: // 01xxxxxx - 14位长度
 		if len(data) < 2 {
-			return nil, fmt.Errorf("data too short for 14-bit length encoding")
+			w.panicF("data too short for 14-bit length encoding")
 		}
 		length := int(firstByte&0x3F)<<8 | int(data[1])
 		if len(data) < 2+length {
-			return nil, fmt.Errorf("data too short for 14-bit length encoding")
+			w.panicF("data too short for 14-bit length encoding")
 		}
-		return []byte(data[2 : 2+length]), nil
+		return []byte(data[2 : 2+length])
 
 	case 2: // 10xxxxxx - 32位长度
 		if len(data) < 5 {
-			return nil, fmt.Errorf("data too short for 32-bit length encoding")
+			w.panicF("data too short for 32-bit length encoding")
 		}
 		length := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
 		if len(data) < 5+length {
-			return nil, fmt.Errorf("data too short for 32-bit length encoding")
+			w.panicF("data too short for 32-bit length encoding")
 		}
-		return []byte(data[5 : 5+length]), nil
+		return []byte(data[5 : 5+length])
 
 	case 3: // 11xxxxxx - 特殊编码
 		format := firstByte & 0x3F
 		switch format {
 		case 0: // 8位整数
 			if len(data) < 2 {
-				return nil, fmt.Errorf("data too short for 8-bit integer")
+				w.panicF("data too short for 8-bit integer")
 			}
-			return []byte(strconv.Itoa(int(int8(data[1])))), nil
+			return []byte(strconv.Itoa(int(int8(data[1]))))
 		case 1: // 16位整数
 			if len(data) < 3 {
-				return nil, fmt.Errorf("data too short for 16-bit integer")
+				w.panicF("data too short for 16-bit integer")
 			}
 			val := int16(data[1]) | int16(data[2])<<8
-			return []byte(strconv.Itoa(int(val))), nil
+			return []byte(strconv.Itoa(int(val)))
 		case 2: // 32位整数
 			if len(data) < 5 {
-				return nil, fmt.Errorf("data too short for 32-bit integer")
+				w.panicF("data too short for 32-bit integer")
 			}
 			val := int32(data[1]) | int32(data[2])<<8 | int32(data[3])<<16 | int32(data[4])<<24
-			return []byte(strconv.Itoa(int(val))), nil
+			return []byte(strconv.Itoa(int(val)))
 		case 3: // LZF压缩字符串
-			return nil, fmt.Errorf("LZF compressed strings not supported")
+			w.panicF("LZF compressed strings not supported")
 		default:
-			return nil, fmt.Errorf("unknown special encoding format: %d", format)
+			w.panicF("unknown special encoding format: %d", format)
 		}
 
 	default:
-		return nil, fmt.Errorf("invalid encoding: %d", encoding)
+		w.panicF("unknown encoding type: %d", encoding)
 	}
+	return nil // This line will never be reached due to panic
 }
 
 func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
+	w.debugF("Handling RESTORE command for entry: DbId=%d, CmdName=%s, Keys=%v, Group=%s", e.DbId, e.CmdName, e.Keys, e.Group)
 	// RESTORE 命令格式: RESTORE key ttl serialized-value [REPLACE] [ABSTTL] [IDLETIME seconds] [FREQ frequency]
 	if len(e.Argv) < 4 {
-		return fmt.Errorf("invalid RESTORE command, expected at least 4 arguments, got %d", len(e.Argv))
+		w.panicF("invalid RESTORE command, expected at least 4 arguments, got %d", len(e.Argv))
 	}
 
 	key := e.Argv[1]
@@ -210,16 +214,16 @@ func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
 	// 解析 TTL (暂时不使用，但保留用于将来扩展)
 	_, err := strconv.ParseInt(ttlStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid TTL value: %s", ttlStr)
+		w.panicF("invalid TTL value: %s", ttlStr)
 	}
-	w.db.Logger.Info(w.ctx, "Handling RESTORE command for key %s with TTL %s", key, ttlStr)
+	w.debugF("Handling RESTORE command for key %s with TTL %s", key, ttlStr)
 
 	// 计算 key 的 SHA256 哈希
 	keyHash := w.calculateHash(key)
 
 	// 解析序列化的 Redis 数据
 	if len(serializedValue) < 11 { // 至少需要 type(1) + data + version(2) + crc(8)
-		return fmt.Errorf("invalid serialized value, too short")
+		w.panicF("invalid serialized value, too short")
 	}
 
 	// 获取数据类型 (第一个字节)
@@ -257,7 +261,7 @@ func (w *GormEntryWriterDemo) HandleRestoreCommand(e *common.Entry) error {
 	// case 20: // RDB_TYPE_SET_LISTPACK
 	// 	return w.handleSetListpackType(key, keyHash, actualData)
 	default:
-		w.db.Logger.Warn(w.ctx, "Unsupported RDB data type %d for key %s", dataType, key)
+		w.warnF("Unsupported RDB data type %d for key %s", dataType, key)
 		return nil // 跳过不支持的类型，不报错
 	}
 }
@@ -269,9 +273,9 @@ func (w *GormEntryWriterDemo) calculateHash(s string) string {
 }
 
 // decodeRDBLength 解码 RDB 长度编码
-func (w *GormEntryWriterDemo) decodeRDBLength(data string, pos int) (int64, int, error) {
+func (w *GormEntryWriterDemo) decodeRDBLength(data string, pos int) (int64, int) {
 	if pos >= len(data) {
-		return 0, 0, fmt.Errorf("position %d exceeds data length %d", pos, len(data))
+		w.panicF("position %d exceeds data length %d", pos, len(data))
 	}
 
 	firstByte := data[pos]
@@ -280,55 +284,56 @@ func (w *GormEntryWriterDemo) decodeRDBLength(data string, pos int) (int64, int,
 	switch encoding {
 	case 0: // 00xxxxxx - 6位长度
 		length := int64(firstByte & 0x3F)
-		return length, 1, nil
+		return length, 1
 
 	case 1: // 01xxxxxx - 14位长度
 		if pos+1 >= len(data) {
-			return 0, 0, fmt.Errorf("data too short for 14-bit length encoding")
+			w.panicF("data too short for 14-bit length encoding")
 		}
 		length := int64(firstByte&0x3F)<<8 | int64(data[pos+1])
-		return length, 2, nil
+		return length, 2
 
 	case 2: // 10xxxxxx - 32位长度
 		if pos+4 >= len(data) {
-			return 0, 0, fmt.Errorf("data too short for 32-bit length encoding")
+			w.panicF("data too short for 32-bit length encoding")
 		}
 		length := int64(data[pos+1])<<24 | int64(data[pos+2])<<16 | int64(data[pos+3])<<8 | int64(data[pos+4])
-		return length, 5, nil
+		return length, 5
 
 	case 3: // 11xxxxxx - 特殊编码（这里应该是长度，不是特殊格式）
 		format := firstByte & 0x3F
 		switch format {
 		case 0: // 后面跟8位整数表示长度
 			if pos+1 >= len(data) {
-				return 0, 0, fmt.Errorf("data too short for 8-bit length")
+				w.panicF("data too short for 8-bit length")
 			}
-			return int64(data[pos+1]), 2, nil
+			return int64(data[pos+1]), 2
 		case 1: // 后面跟16位整数表示长度
 			if pos+2 >= len(data) {
-				return 0, 0, fmt.Errorf("data too short for 16-bit length")
+				w.panicF("data too short for 16-bit length")
 			}
 			length := int64(data[pos+1]) | int64(data[pos+2])<<8
-			return length, 3, nil
+			return length, 3
 		case 2: // 后面跟32位整数表示长度
 			if pos+4 >= len(data) {
-				return 0, 0, fmt.Errorf("data too short for 32-bit length")
+				w.panicF("data too short for 32-bit length")
 			}
 			length := int64(data[pos+1]) | int64(data[pos+2])<<8 | int64(data[pos+3])<<16 | int64(data[pos+4])<<24
-			return length, 5, nil
+			return length, 5
 		default:
-			return 0, 0, fmt.Errorf("unknown length encoding format: %d", format)
+			w.panicF("unknown length encoding format: %d", format)
 		}
 
 	default:
-		return 0, 0, fmt.Errorf("invalid length encoding: %d", encoding)
+		w.panicF("invalid length encoding: %d", encoding)
 	}
+	return 0, 0 // This line will never be reached due to panic
 }
 
 // calculateRDBStringLength 计算 RDB 字符串编码占用的字节数
-func (w *GormEntryWriterDemo) calculateRDBStringLength(data string) (int, error) {
+func (w *GormEntryWriterDemo) calculateRDBStringLength(data string) int {
 	if len(data) == 0 {
-		return 0, fmt.Errorf("empty data")
+		w.panicF("empty data")
 	}
 
 	firstByte := data[0]
@@ -337,108 +342,94 @@ func (w *GormEntryWriterDemo) calculateRDBStringLength(data string) (int, error)
 	switch encoding {
 	case 0: // 00xxxxxx - 6位长度
 		length := int(firstByte & 0x3F)
-		return 1 + length, nil
+		return 1 + length
 
 	case 1: // 01xxxxxx - 14位长度
 		if len(data) < 2 {
-			return 0, fmt.Errorf("data too short for 14-bit length encoding")
+			w.panicF("data too short for 14-bit length encoding")
 		}
 		length := int(firstByte&0x3F)<<8 | int(data[1])
-		return 2 + length, nil
+		return 2 + length
 
 	case 2: // 10xxxxxx - 32位长度
 		if len(data) < 5 {
-			return 0, fmt.Errorf("data too short for 32-bit length encoding")
+			w.panicF("data too short for 32-bit length encoding")
 		}
 		length := int(data[1])<<24 | int(data[2])<<16 | int(data[3])<<8 | int(data[4])
-		return 5 + length, nil
+		return 5 + length
 
 	case 3: // 11xxxxxx - 特殊编码
 		format := firstByte & 0x3F
 		switch format {
 		case 0: // 8位整数
-			return 2, nil
+			return 2
 		case 1: // 16位整数
-			return 3, nil
+			return 3
 		case 2: // 32位整数
-			return 5, nil
+			return 5
 		case 3: // LZF压缩字符串
-			return 0, fmt.Errorf("LZF compressed strings not supported")
+			w.panicF("LZF compressed strings not supported")
 		default:
-			return 0, fmt.Errorf("unknown special encoding format: %d", format)
+			w.panicF("unknown special encoding format: %d", format)
 		}
 
 	default:
-		return 0, fmt.Errorf("invalid encoding: %d", encoding)
+		w.panicF("invalid encoding: %d", encoding)
 	}
+	return 0 // This line will never be reached due to panic
 }
 
 // 处理 String 类型
 func (w *GormEntryWriterDemo) handleStringType(key, keyHash, data string) error {
 	// 解码 RDB 字符串数据，移除长度编码前缀
-	decodedValue, err := w.decodeRDBString(data)
-	if err != nil {
-		return fmt.Errorf("failed to decode RDB string for key %s: %v", key, err)
-	}
+	decodedValue := w.decodeRDBString(data)
 
 	record := RedisString{
 		KeyHash:   keyHash,
 		Key:       key,
-		Value:     decodedValue.([]byte),
+		Value:     decodedValue,
 		CreatedAt: time.Now(),
 	}
 
-	return w.db.Save(&record).Error
+	if err := w.db.Save(&record).Error; err != nil {
+		w.panicF("failed to save string record for key %s: %v", key, err)
+	}
+	return nil
 }
 
 // 处理 Hash 类型 (RDB_TYPE_HASH)
 func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
-	w.db.Logger.Info(w.ctx, "Handling Hash for key %s with data length: %d, data-hex: %x", key, len(data), data)
+	w.debugF("Handling Hash for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	if len(data) == 0 {
-		w.db.Logger.Warn(w.ctx, "Empty hash data for key %s", key)
+		w.warnF("Empty hash data for key %s", key)
 		return nil
 	}
 
 	pos := 0
 
 	// 首先读取哈希表的大小
-	hashSize, bytesRead, err := w.decodeRDBLength(data, pos)
-	if err != nil {
-		return fmt.Errorf("failed to decode hash size for key %s: %v", key, err)
-	}
+	hashSize, bytesRead := w.decodeRDBLength(data, pos)
 	pos += bytesRead
 
-	w.db.Logger.Info(w.ctx, "Hash size: %d entries for key %s", hashSize, key)
+	w.debugF("Hash size: %d entries for key %s", hashSize, key)
 
 	// 解析每个 field-value 对
 	for i := 0; i < int(hashSize); i++ {
 		// 解码 field
-		fieldValue, err := w.decodeRDBString(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to decode hash field %d for key %s: %v", i, key, err)
-		}
-		field := string(fieldValue.([]byte))
+		fieldValue := w.decodeRDBString(data[pos:])
+		field := string(fieldValue)
 
 		// 计算field消耗的字节数以移动位置
-		fieldBytesUsed, err := w.calculateRDBStringLength(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to calculate field length for key %s: %v", key, err)
-		}
+		fieldBytesUsed := w.calculateRDBStringLength(data[pos:])
 		pos += fieldBytesUsed
 
 		// 解码 value
-		valueData, err := w.decodeRDBString(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to decode hash value %d for key %s: %v", i, key, err)
-		}
-		value := valueData.([]byte)
+		valueData := w.decodeRDBString(data[pos:])
+		value := valueData
 
 		// 计算value消耗的字节数以移动位置
-		valueBytesUsed, err := w.calculateRDBStringLength(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to calculate value length for key %s: %v", key, err)
-		}
+		valueBytesUsed := w.calculateRDBStringLength(data[pos:])
 		pos += valueBytesUsed
 
 		// 保存到数据库
@@ -453,31 +444,28 @@ func (w *GormEntryWriterDemo) handleHashType(key, keyHash, data string) error {
 		}
 
 		if err := w.db.Save(&record).Error; err != nil {
-			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
+			w.panicF("failed to save hash field %s for key %s: %v", field, key, err)
 		}
 
-		w.db.Logger.Info(w.ctx, "Saved hash field %d: key=%s, field=%s, value=%s", i, key, field, string(value))
+		w.debugF("Saved hash field %d: key=%s, field=%s, value=%s", i, key, field, string(value))
 	}
 
-	w.db.Logger.Info(w.ctx, "Successfully processed %d hash entries for key %s", hashSize, key)
+	w.debugF("Successfully processed %d hash entries for key %s", hashSize, key)
 	return nil
 }
 
 func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) error {
-	w.db.Logger.Info(w.ctx, "Handling Hash Listpack for key %s with data length: %d, data-hex: %x", key, len(data), data)
+	w.debugF("Handling Hash Listpack for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	// 解析 Listpack 格式的 Hash 数据
-	entries, err := w.parseListpack(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse listpack for key %s: %v", key, err)
-	}
+	entries := w.parseListpack(data)
 
 	// Hash Listpack 格式：field1, value1, field2, value2, ...
 	if len(entries)%2 != 0 {
-		w.db.Logger.Warn(w.ctx, "Odd number of entries (%d) for key %s, truncating last entry", len(entries), key)
+		w.warnF("Odd number of entries (%d) for key %s, truncating last entry", len(entries), key)
 	}
 
-	w.db.Logger.Info(w.ctx, "Successfully parsed %d entries (%d field-value pairs) for key %s", len(entries), len(entries)/2, key)
+	w.debugF("Successfully parsed %d entries (%d field-value pairs) for key %s", len(entries), len(entries)/2, key)
 
 	// 逐对处理 field-value
 	for i := 0; i < len(entries); i += 2 {
@@ -495,10 +483,10 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 		}
 
 		if err := w.db.Save(&record).Error; err != nil {
-			return fmt.Errorf("failed to save hash field %s for key %s: %v", field, key, err)
+			w.panicF("failed to save hash field %s for key %s: %v", field, key, err)
 		}
 
-		w.db.Logger.Info(w.ctx, "Saved hash field: key=%s, field=%s, value=%s", key, field, value)
+		w.debugF("Saved hash field: key=%s, field=%s, value=%s", key, field, value)
 	}
 
 	return nil
@@ -506,43 +494,34 @@ func (w *GormEntryWriterDemo) handleHashListpackType(key, keyHash, data string) 
 
 // 处理 ZSet 类型 (RDB_TYPE_ZSET, RDB_TYPE_ZSET_2)
 func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
-	w.db.Logger.Info(w.ctx, "Handling ZSet for key %s with data length: %d, data-hex: %x", key, len(data), data)
+	w.debugF("Handling ZSet for key %s with data length: %d, data-hex: %x", key, len(data), data)
 
 	if len(data) == 0 {
-		w.db.Logger.Warn(w.ctx, "Empty zset data for key %s", key)
+		w.warnF("Empty zset data for key %s", key)
 		return nil
 	}
 
 	pos := 0
 
 	// 首先读取有序集合的大小
-	zsetSize, bytesRead, err := w.decodeRDBLength(data, pos)
-	if err != nil {
-		return fmt.Errorf("failed to decode zset size for key %s: %v", key, err)
-	}
+	zsetSize, bytesRead := w.decodeRDBLength(data, pos)
 	pos += bytesRead
 
-	w.db.Logger.Info(w.ctx, "ZSet size: %d entries for key %s", zsetSize, key)
+	w.debugF("ZSet size: %d entries for key %s", zsetSize, key)
 
 	// 解析每个 member-score 对
 	for i := 0; i < int(zsetSize); i++ {
 		// 解码 member
-		memberValue, err := w.decodeRDBString(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to decode zset member %d for key %s: %v", i, key, err)
-		}
-		member := string(memberValue.([]byte))
+		memberValue := w.decodeRDBString(data[pos:])
+		member := string(memberValue)
 
 		// 计算member消耗的字节数以移动位置
-		memberBytesUsed, err := w.calculateRDBStringLength(data[pos:])
-		if err != nil {
-			return fmt.Errorf("failed to calculate member length for key %s: %v", key, err)
-		}
+		memberBytesUsed := w.calculateRDBStringLength(data[pos:])
 		pos += memberBytesUsed
 
 		// 解码 score (8字节双精度浮点数, little-endian)
 		if pos+8 > len(data) {
-			return fmt.Errorf("insufficient data for zset score %d for key %s", i, key)
+			w.panicF("insufficient data for zset score %d for key %s", i, key)
 		}
 
 		// 从8个字节构造double（IEEE 754格式，little-endian）
@@ -573,20 +552,20 @@ func (w *GormEntryWriterDemo) handleZSetType(key, keyHash, data string) error {
 		}
 
 		if err := w.db.Save(&record).Error; err != nil {
-			return fmt.Errorf("failed to save zset member %s for key %s: %v", member, key, err)
+			w.panicF("failed to save zset member %s for key %s: %v", member, key, err)
 		}
 
-		w.db.Logger.Info(w.ctx, "Saved zset member %d: key=%s, member=%s, score=%f", i, key, member, score)
+		w.debugF("Saved zset member %d: key=%s, member=%s, score=%f", i, key, member, score)
 	}
 
-	w.db.Logger.Info(w.ctx, "Successfully processed %d zset entries for key %s", zsetSize, key)
+	w.debugF("Successfully processed %d zset entries for key %s", zsetSize, key)
 	return nil
 }
 
 // parseListpack 解析 Listpack 格式的数据
-func (w *GormEntryWriterDemo) parseListpack(data string) ([]string, error) {
+func (w *GormEntryWriterDemo) parseListpack(data string) []string {
 	if len(data) < 7 { // 至少需要 header(6字节) + 结束符(1字节)
-		return nil, fmt.Errorf("listpack data too short: %d bytes", len(data))
+		w.panicF("listpack data too short: %d bytes", len(data))
 	}
 
 	// 尝试从不同位置开始解析，因为可能有前缀字节
@@ -604,59 +583,56 @@ func (w *GormEntryWriterDemo) parseListpack(data string) ([]string, error) {
 			continue // 尝试下一个offset
 		}
 
-		w.db.Logger.Info(w.ctx, "Parsing Listpack at offset %d: totalBytes=%d, size=%d", offset, totalBytes, size)
+		w.debugF("Parsing Listpack at offset %d: totalBytes=%d, size=%d", offset, totalBytes, size)
 
 		var elements []string
 
 		// 读取每个元素
 		for i := 0; i < size && pos < len(data)-1; i++ {
 			if pos >= len(data) {
-				w.db.Logger.Warn(w.ctx, "Reached end of data while parsing listpack entry %d at position %d", i, pos)
+				w.warnF("Reached end of data while parsing listpack entry %d at position %d", i, pos)
 				break
 			}
 
-			element, nextPos, err := w.parseListpackEntry(data, pos)
-			if err != nil {
-				w.db.Logger.Warn(w.ctx, "Failed to parse listpack entry %d at position %d: %v", i, pos, err)
-				break
-			}
+			element, nextPos := w.parseListpackEntry(data, pos)
 
 			if nextPos <= pos {
-				w.db.Logger.Warn(w.ctx, "Next position %d is not greater than current position %d for entry %d", nextPos, pos, i)
+				w.warnF("Next position %d is not greater than current position %d for entry %d", nextPos, pos, i)
 				break
 			}
 
 			elements = append(elements, element)
 			pos = nextPos
 
-			w.db.Logger.Info(w.ctx, "Parsed listpack entry %d: %s at position %d", i, element, pos)
+			w.debugF("Parsed listpack entry %d: %s at position %d", i, element, pos)
 		}
 
 		// 如果解析到了预期数量的元素，就认为成功
 		if len(elements) == size {
 			// 验证结束标记（可选，因为可能没有）
 			if pos < len(data) && data[pos] != 0xFF {
-				w.db.Logger.Warn(w.ctx, "Listpack did not end with expected 0xFF byte at position %d", pos)
+				w.warnF("Listpack did not end with expected 0xFF byte at position %d", pos)
 			} else {
-				w.db.Logger.Info(w.ctx, "Successfully parsed Listpack with %d elements at offset %d", len(elements), offset)
+				w.debugF("Successfully parsed Listpack with %d elements at offset %d", len(elements), offset)
 			}
-			return elements, nil
+			return elements
 		}
 	}
 
-	return nil, fmt.Errorf("failed to parse listpack with any offset")
+	w.panicF("failed to parse listpack with any offset")
+	return nil // This line will never be reached due to panic
 }
 
 // parseListpackEntry 解析单个 Listpack 条目
-func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, int, error) {
+func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, int) {
 	if pos >= len(data) {
-		return "", pos, fmt.Errorf("position %d exceeds data length %d", pos, len(data))
+		w.panicF("position %d exceeds data length %d", pos, len(data))
 	}
 
 	firstByte := data[pos]
 	pos++
 
-	w.db.Logger.Info(w.ctx, "Parsing Listpack entry at position %d with first byte: 0x%02X", pos-1, firstByte)
+	w.debugF("Parsing Listpack entry at position %d with first byte: 0x%02X", pos-1, firstByte)
 
 	// 按照 Redis Listpack 编码规范的优先级顺序解析
 	if (firstByte & 0x80) == 0x00 { // 7位无符号整数: 0xxxxxxx
@@ -666,13 +642,13 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		fmt.Printf("Parsed 7-bit uint: %d\n", value)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 7-bit uint: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else if (firstByte & 0xC0) == 0x80 { // 6位字符串长度: 10xxxxxx
 		length := int(firstByte & 0x3F)
 		if pos+length > len(data) {
-			return "", pos, fmt.Errorf("6-bit string length %d exceeds remaining data at position %d (data length: %d)", length, pos, len(data))
+			w.panicF("6-bit string length %d exceeds remaining data at position %d (data length: %d)", length, pos, len(data))
 		}
 		value := data[pos : pos+length]
 		pos += length
@@ -682,12 +658,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 6-bit string (len=%d): %s at position %d", length, value, pos)
-		return value, pos, nil
+		w.debugF("Parsed 6-bit string (len=%d): %s at position %d", length, value, pos)
+		return value, pos
 
 	} else if (firstByte & 0xE0) == 0xC0 { // 13位有符号整数: 110xxxxx
 		if pos >= len(data) {
-			return "", pos, fmt.Errorf("13-bit int missing second byte")
+			w.panicF("13-bit int missing second byte")
 		}
 		secondByte := data[pos]
 		pos++
@@ -703,19 +679,19 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 13-bit int: %d at position %d", value, pos)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 13-bit int: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else if (firstByte & 0xF0) == 0xE0 { // 12位字符串长度: 1110xxxx
 		if pos >= len(data) {
-			return "", pos, fmt.Errorf("12-bit string missing second byte")
+			w.panicF("12-bit string missing second byte")
 		}
 		secondByte := data[pos]
 		pos++
 
 		length := (int(firstByte&0x0F) << 8) | int(secondByte)
 		if pos+length > len(data) {
-			return "", pos, fmt.Errorf("12-bit string length %d exceeds remaining data", length)
+			w.panicF("12-bit string length %d exceeds remaining data", length)
 		}
 		value := data[pos : pos+length]
 		pos += length
@@ -725,17 +701,17 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 12-bit string (len=%d): %s at position %d", length, value, pos)
-		return value, pos, nil
+		w.debugF("Parsed 12-bit string (len=%d): %s at position %d", length, value, pos)
+		return value, pos
 
 	} else if firstByte == 0xF0 { // 32位字符串长度
 		if pos+4 > len(data) {
-			return "", pos, fmt.Errorf("32-bit string missing length bytes")
+			w.panicF("32-bit string missing length bytes")
 		}
 		length := int(data[pos]) | int(data[pos+1])<<8 | int(data[pos+2])<<16 | int(data[pos+3])<<24
 		pos += 4
 		if pos+length > len(data) {
-			return "", pos, fmt.Errorf("32-bit string length %d exceeds remaining data", length)
+			w.panicF("32-bit string length %d exceeds remaining data", length)
 		}
 		value := data[pos : pos+length]
 		pos += length
@@ -745,12 +721,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 32-bit string (len=%d): %s at position %d", length, value, pos)
-		return value, pos, nil
+		w.debugF("Parsed 32-bit string (len=%d): %s at position %d", length, value, pos)
+		return value, pos
 
 	} else if firstByte == 0xF1 { // 16位有符号整数
 		if pos+2 > len(data) {
-			return "", pos, fmt.Errorf("16-bit int missing bytes")
+			w.panicF("16-bit int missing bytes")
 		}
 		value := int64(data[pos]) | int64(data[pos+1])<<8
 		pos += 2
@@ -764,12 +740,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 16-bit int: %d at position %d", value, pos)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 16-bit int: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else if firstByte == 0xF2 { // 24位有符号整数
 		if pos+3 > len(data) {
-			return "", pos, fmt.Errorf("24-bit int missing bytes")
+			w.panicF("24-bit int missing bytes")
 		}
 		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16
 		pos += 3
@@ -783,12 +759,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 24-bit int: %d at position %d", value, pos)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 24-bit int: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else if firstByte == 0xF3 { // 32位有符号整数
 		if pos+4 > len(data) {
-			return "", pos, fmt.Errorf("32-bit int missing bytes")
+			w.panicF("32-bit int missing bytes")
 		}
 		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16 | int64(data[pos+3])<<24
 		pos += 4
@@ -802,12 +778,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 32-bit int: %d at position %d", value, pos)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 32-bit int: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else if firstByte == 0xF4 { // 64位有符号整数
 		if pos+8 > len(data) {
-			return "", pos, fmt.Errorf("64-bit int missing bytes")
+			w.panicF("64-bit int missing bytes")
 		}
 		value := int64(data[pos]) | int64(data[pos+1])<<8 | int64(data[pos+2])<<16 | int64(data[pos+3])<<24 |
 			int64(data[pos+4])<<32 | int64(data[pos+5])<<40 | int64(data[pos+6])<<48 | int64(data[pos+7])<<56
@@ -818,11 +794,12 @@ func (w *GormEntryWriterDemo) parseListpackEntry(data string, pos int) (string, 
 		if pos+backLengthBytes <= len(data) {
 			pos += backLengthBytes
 		}
-		w.db.Logger.Info(w.ctx, "Parsed 64-bit int: %d at position %d", value, pos)
-		return strconv.FormatInt(value, 10), pos, nil
+		w.debugF("Parsed 64-bit int: %d at position %d", value, pos)
+		return strconv.FormatInt(value, 10), pos
 
 	} else {
-		return "", pos, fmt.Errorf("unknown listpack encoding: 0x%x at position %d", firstByte, pos-1)
+		w.panicF("unknown listpack encoding: 0x%x at position %d", firstByte, pos-1)
+		return "", pos // This line will never be reached due to panic
 	}
 }
 

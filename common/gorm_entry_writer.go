@@ -1,11 +1,5 @@
 package common
 
-import (
-	"context"
-
-	"gorm.io/gorm"
-)
-
 // Entry represents a Redis entry for external use
 type Entry struct {
 	DbId           int
@@ -19,7 +13,7 @@ type Entry struct {
 }
 
 type GormEntryWriter interface {
-	Init(ctx context.Context, db *gorm.DB) error
+	Init() error
 	Write(e *Entry) error
 	Close() error
 }
