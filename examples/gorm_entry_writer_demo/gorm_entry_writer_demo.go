@@ -69,7 +69,8 @@ func (RedisList) TableName() string   { return "redis_list" }
 func (RedisSet) TableName() string    { return "redis_set" }
 func (RedisZSet) TableName() string   { return "redis_zset" }
 
-func NewWriter(db *gorm.DB, debugF, infoF, warnF, panicF func(msg string, args ...interface{})) common.GormEntryWriter {
+func NewWriter(config string, db *gorm.DB, debugF, infoF, warnF, panicF func(msg string, args ...interface{})) common.GormEntryWriter {
+	infoF("Creating new GormEntryWriterDemo with config: %s", config)
 	demo := &GormEntryWriterDemo{
 		db:     db,
 		debugF: debugF,

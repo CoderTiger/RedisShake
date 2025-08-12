@@ -51,8 +51,13 @@ use_ssl = false
 max_idle_conns = 10
 max_open_conns = 100
 conn_max_lifetime = -1 # seconds, <= 0 means no limit
+# Plugin configuration: array of maps where each map has plugin_path -> config_json
 plugins = [
-    "/your_plugin_folder/plugin_file.so", # replace with your actual plugin path
+    {"/your_plugin_folder/plugin_file.so" = """
+    {
+        "dummy_field": "example_value"
+    }
+    """ }
 ]
 log_level = "info" # silent, error, warn, info
 

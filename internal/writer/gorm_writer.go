@@ -31,9 +31,10 @@ type GormWriterOptions struct {
 	MaxIdleConns    int `mapstructure:"max_idle_conns" default:"10"`
 	MaxOpenConns    int `mapstructure:"max_open_conns" default:"100"`
 	ConnMaxLifetime int `mapstructure:"conn_max_lifetime" default:"-1"` // no limit
-	// Entry writer plugins
-	Plugins  []string `mapstructure:"plugins" default:"[]"`
-	LogLevel string   `mapstructure:"log_level" default:"info"` // all options: silent, error, warn, info
+	// Entry writer plugins: array of plugin configurations
+	Plugins []map[string]string `mapstructure:"plugins" default:"[]"`
+
+	LogLevel string `mapstructure:"log_level" default:"info"` // all options: silent, error, warn, info
 }
 
 // implements Writer interface
@@ -98,7 +99,25 @@ func createDB(opts *GormWriterOptions) *gorm.DB {
 
 func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWriter, error) {
 	var plugins []*common.GormEntryWriter
-	for _, pluginPath := range opts.Plugins {
+	for _, pluginMap := range opts.Plugins {
+		// Each pluginMap should have exactly one key-value pair: plugin_path -> config_json
+		if len(pluginMap) != 1 {
+			log.Panicf("each plugin configuration must have exactly one key-value pair, got %d pairs", len(pluginMap))
+		}
+
+		var pluginPath, pluginConfig string
+		for path, config := range pluginMap {
+			pluginPath = strings.TrimSpace(path)
+			pluginConfig = strings.TrimSpace(config)
+			break // Only one iteration since we expect exactly one pair
+		}
+
+		if pluginPath == "" {
+			continue // skip empty plugin paths
+		}
+
+		log.Infof("Loading plugin: %s with config: %s", pluginPath, pluginConfig)
+
 		pluginObj, err := plugin.Open(pluginPath)
 		if err != nil {
 			log.Panicf("failed to open plugin %s: %v", pluginPath, err)
@@ -109,12 +128,12 @@ func loadPlugins(opts *GormWriterOptions, db *gorm.DB) ([]*common.GormEntryWrite
 			log.Panicf("plugin %s does not export 'NewWriter' symbol: %v", pluginPath, err)
 		}
 
-		newWriterFunc, ok := newWriterFuncSym.(func(db *gorm.DB, infoF, warnF, errorF, panicF func(msg string, args ...interface{})) common.GormEntryWriter)
+		newWriterFunc, ok := newWriterFuncSym.(func(config string, db *gorm.DB, infoF, warnF, errorF, panicF func(msg string, args ...interface{})) common.GormEntryWriter)
 		if !ok {
 			log.Panicf("plugin %s does not export 'NewWriter' function with correct signature", pluginPath)
 		}
 
-		p := newWriterFunc(db, log.Debugf, log.Infof, log.Warnf, log.Panicf)
+		p := newWriterFunc(pluginConfig, db, log.Debugf, log.Infof, log.Warnf, log.Panicf)
 		if p == nil {
 			log.Panicf("plugin %s returned nil writer", pluginPath)
 		}
